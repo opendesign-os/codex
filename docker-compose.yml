@@ -1,0 +1,22 @@
+# The codex server in a container on the host's network, so .env's localhost is this machine: the
+# same PostgreSQL, Redis and OpenSandbox server as outside Docker. Docker Desktop needs host networking turned on.
+# Codex runs in the threads' sandboxes, which keep the workspaces and sessions, not in this container.
+
+services:
+  codex:
+    build:
+      # The parent directory, so the image can include the zorvex checkout next to this one.
+      context: ..
+      dockerfile: codex/Dockerfile
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - .env
+    environment:
+      - PORT=${PORT:-2027}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:${PORT:-2027}/ok || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s

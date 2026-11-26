@@ -1,0 +1,10 @@
+{
+  "name": "codex",
+  "dependencies": ["./src"],
+  "graphs": {
+    "codex": {
+      "path": "./src/codex_agent/graph.py:graph",
+      "description": "Codex through codex app-server in an OpenSandbox sandbox per thread, with one workspace and one Codex thread"
+    }
+  }
+}

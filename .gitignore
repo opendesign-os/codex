@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+.venv/
+
+# Settings, secrets included
+.env
+
+# Runtime: the workspaces (WORKSPACE_ROOT) and Codex's home (CODEX_HOME)
+.workspaces/
+.codex-home/
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

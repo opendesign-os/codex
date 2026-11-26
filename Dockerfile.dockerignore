@@ -1,0 +1,11 @@
+# The build context is the parent directory; send only what the Dockerfile copies.
+*
+!zorvex/libs/zorvex-api
+!zorvex/libs/zorvex-cli
+!codex/pyproject.toml
+!codex/uv.lock
+!codex/zorvex.json
+!codex/src
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
