@@ -3,7 +3,7 @@
   "dependencies": ["./src"],
   "graphs": {
     "codex": {
-      "path": "./src/codex_agent/graph.py:graph",
+      "path": "./src/agent/graph.py:graph",
       "description": "Codex through codex app-server, in one OpenSandbox sandbox per assistant, a Codex session and workspace per thread"
     }
   }

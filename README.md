@@ -22,9 +22,11 @@ uv sync
 uv run zorvex dev --port 2027 --no-db-check
 ```
 
+On a server, follow [DEPLOY.md](DEPLOY.md).
+
 ## Environment
 
-All required; `src/codex_agent/settings.py` reads them and the server stops at startup when one is missing.
+All required; `src/agent/settings.py` reads them and the server stops at startup when one is missing.
 
 | Variable | |
 |---|---|
@@ -37,7 +39,7 @@ All required; `src/codex_agent/settings.py` reads them and the server stops at s
 
 ## Assistants
 
-An assistant's context (`src/codex_agent/context.py`) has four fields, all required, and no others:
+An assistant's context (`src/agent/context.py`) has four fields, all required, and no others:
 
 | Field | |
 |---|---|

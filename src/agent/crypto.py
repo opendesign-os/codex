@@ -1,7 +1,7 @@
 import hashlib
 import hmac
 
-from codex_agent.settings import settings
+from agent.settings import settings
 
 
 def sign(message: str) -> str:

@@ -18,8 +18,8 @@ from langgraph.config import get_config
 from langgraph.graph import END, START, StateGraph, add_messages
 from langgraph.runtime import Runtime
 
-from codex_agent import human, sandbox, stream, workspace
-from codex_agent.context import Context
+from agent import human, sandbox, stream, workspace
+from agent.context import Context
 
 
 class Input(TypedDict):

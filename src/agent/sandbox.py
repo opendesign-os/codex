@@ -27,10 +27,10 @@ from opensandbox.models.sandboxes import (
     Volume,
 )
 
-from codex_agent import server
-from codex_agent.context import Context
-from codex_agent.crypto import sign
-from codex_agent.settings import settings
+from agent import server
+from agent.context import Context
+from agent.crypto import sign
+from agent.settings import settings
 
 logger = logging.getLogger(__name__)
 

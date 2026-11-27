@@ -38,7 +38,7 @@ select = ["E", "W", "F", "I", "B", "C4", "UP", "ARG", "SIM"]
 ignore = ["E501", "ARG001", "ARG002"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["codex_agent"]
+known-first-party = ["agent"]
 
 [tool.pyright]
 include = ["src"]

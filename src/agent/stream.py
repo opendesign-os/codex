@@ -11,7 +11,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk, AnyMessage, BaseM
 from langgraph.graph.message import push_message
 from pydantic import BaseModel
 
-from codex_agent import human
+from agent import human
 
 
 @dataclass(frozen=True)

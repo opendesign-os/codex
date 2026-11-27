@@ -6,7 +6,7 @@ from typing import Final
 from opensandbox import Sandbox
 from opensandbox.models.filesystem import DirectoryListEntry, WriteEntry
 
-from codex_agent.settings import settings
+from agent.settings import settings
 
 logger = logging.getLogger(__name__)
 

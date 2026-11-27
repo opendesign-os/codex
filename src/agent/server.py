@@ -5,8 +5,8 @@ from typing import Final
 import httpx
 from opensandbox import Sandbox
 
-from codex_agent.context import Context
-from codex_agent.crypto import sign
+from agent.context import Context
+from agent.crypto import sign
 
 PORT: Final = 8080
 PROVIDER: Final = "litellm"
