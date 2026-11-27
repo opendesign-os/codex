@@ -1,69 +1,87 @@
 # codex
 
-Codex, through `codex app-server` and the [codex-python](https://github.com/gersmann/codex-python) client, as one
-LangGraph graph, `codex`, served by [Zorvex](../zorvex) (installed from the checkout at `../zorvex`). Codex's models come
-through a LiteLLM gateway.
-
-Each assistant has one sandbox on OpenSandbox, shared by its threads, where `codex app-server` runs. Every thread is a
-Codex session of its own under its own workspace subdirectory. A run connects to the app-server over WebSocket and sends
-the thread's latest user message to Codex as a turn. It streams the turn into the thread as it runs: Codex's messages,
-and its commands, file changes and other tool calls with their results. The next run on the thread resumes its session.
+Codex as the LangGraph graph `codex`, served by [Zorvex](../zorvex): it runs `codex app-server` in an
+[OpenSandbox](https://github.com/alibaba/OpenSandbox) sandbox and drives it with the
+[codex-python](https://github.com/gersmann/codex-python) client. Each assistant has one sandbox, shared by its threads,
+and each thread is a Codex session with its own workspace, `/data/workspace/<thread>`. A run sends the thread's latest
+user message to Codex as a turn and streams Codex's messages and tool calls into the thread; the next run resumes it.
 
 ## Run
 
-The server keeps its data in this machine's PostgreSQL, in the `codex` schema of the `postgres` database
-(`DATABASE_URI`), and uses Redis database 3 (`REDIS_URI`). Create the schema once:
+Zorvex keeps its data in PostgreSQL, in the schema `codex`:
 
 ```sql
 CREATE SCHEMA codex;
 ```
 
-The sandboxes come from the OpenSandbox server in [`../opensandbox`](../opensandbox), with the `opensandbox-codex`
-image built there.
-
 ```bash
-cp .env.example .env                           # fill in the database password, the gateway's settings and the OpenSandbox API key
+cp .env.example .env            # the database password, OPEN_SANDBOX_API_KEY and SANDBOX_MOUNT_PATH
+docker compose up -d --build    # the OpenSandbox server on 127.0.0.1:8080 and the sandbox image
 uv sync
-uv run zorvex dev --port 2027 --no-db-check    # the server on 127.0.0.1:2027; --no-db-check: no PostgreSQL container
-docker compose up --build                      # or the server in Docker
+uv run zorvex dev --port 2027 --no-db-check
 ```
 
-Call `codex` from the console or any LangGraph SDK client:
+## Environment
 
-```python
-from langgraph_sdk import get_client
+All required; `src/codex_agent/settings.py` reads them and the server stops at startup when one is missing.
 
-client = get_client(url="http://127.0.0.1:2027")
-thread = await client.threads.create()
-async for part in client.runs.stream(
-    thread["thread_id"],
-    "codex",
-    input={"messages": [{"role": "user", "content": "Write a hello world in Python and run it"}]},
-    stream_mode="messages-tuple",
-):
-    print(part.event, part.data)
+| Variable | |
+|---|---|
+| `DATABASE_URI`, `REDIS_URI` | Zorvex's PostgreSQL and Redis. |
+| `OPEN_SANDBOX_DOMAIN` | The OpenSandbox server, `127.0.0.1:8080` with `docker-compose.yml`. |
+| `OPEN_SANDBOX_API_KEY` | The OpenSandbox server's API key, which `docker-compose.yml` also gives the server. It signs each sandbox's app-server token. |
+| `SANDBOX_MOUNT_PATH` | Where the assistants' skills are: each sandbox mounts `<path>/.agent/skills/<assistant_id>` read-only as `/etc/codex/skills`. A Windows path, unquoted or in single quotes, or a path on the Docker host. |
+| `SANDBOX_IDLE` | How long a sandbox outlives its last run, as an ISO 8601 duration such as `PT1H`. |
+| `SANDBOX_RETENTION` | How long a thread's session and workspace outlive its last run, such as `P7D`. |
+
+## Assistants
+
+An assistant's context (`src/codex_agent/context.py`) has four fields, all required, and no others:
+
+| Field | |
+|---|---|
+| `base_url` | The LiteLLM gateway's OpenAI-compatible base URL, reachable from the sandbox. |
+| `api_key` | The gateway's key. The sandbox only gets a placeholder; OpenSandbox's Credential Vault puts the key on its requests to the gateway. |
+| `allowed_hosts` | Hosts the sandbox may reach besides the gateway, `[]` for none; everything else is blocked. |
+| `codex` | Codex's own config, as in its `config.toml`, for every thread. Set `sandbox_mode = "danger-full-access"` and `approval_policy = "never"`: the OpenSandbox sandbox is the boundary, and Codex's own sandbox cannot run inside it. Without `model`, Codex picks one from the gateway's `/models` catalog, which takes LiteLLM v1.106 or later. |
+
+`base_url`, `api_key`, `allowed_hosts` and whether `codex.model` is set make up the sandbox, so changing them replaces
+it on the next run; its volume keeps the workspaces and sessions. The context is stored as given, the key included.
+
+The system assistant `codex` belongs to the server, so it is configured in the database: its row in `codex.assistant`,
+whose `config.configurable` is the context, and a new row in `codex.assistant_versions` for each change.
+
+```sql
+BEGIN;
+
+UPDATE codex.assistant AS a
+SET config = a.config || jsonb_build_object('configurable',
+        coalesce(a.config -> 'configurable', '{}'::jsonb) || jsonb_build_object(
+            'base_url', 'https://litellm.example.com/v1',
+            'api_key',  'sk-...',
+            'allowed_hosts', '[]'::jsonb,
+            'codex', jsonb_build_object(
+                'model', 'codex/gpt-5.6-luna',
+                'sandbox_mode', 'danger-full-access',
+                'approval_policy', 'never')
+        )),
+    version = (SELECT coalesce(max(v.version), 0) + 1
+               FROM codex.assistant_versions AS v
+               WHERE v.assistant_id = a.assistant_id),
+    updated_at = now()
+WHERE a.graph_id = 'codex' AND a.user_id = 'system';
+
+INSERT INTO codex.assistant_versions (assistant_id, version, graph_id, config, metadata, name, description)
+SELECT assistant_id, version, graph_id, config, metadata, name, description
+FROM codex.assistant
+WHERE graph_id = 'codex' AND user_id = 'system';
+
+COMMIT;
 ```
-
-## Configuration
-
-- **OpenSandbox**: its server is `OPEN_SANDBOX_DOMAIN` (`host:port`, required) over `OPEN_SANDBOX_PROTOCOL` (`http`, the default, or `https`), with `OPEN_SANDBOX_API_KEY`. The sandboxes' endpoints use the same protocol. The API key also derives each sandbox's app-server token.
-  - `SANDBOX_IMAGE` is the sandbox image. It holds the Codex runtime that codex-python pins (`openai-codex-cli-bin` in `uv.lock`), so rebuild it when that changes.
-  - `SANDBOX_SHARED_PATH` is the shared skills directory, as the Docker host sees it. With Docker Desktop, `G:\workspace\.codex` is `/run/desktop/mnt/host/g/workspace/.codex`.
-  - `SANDBOX_IDLE_SECONDS` (default 3600) is how long a sandbox outlives its last run.
-  - `SANDBOX_ALLOWED_HOSTS` (comma-separated) are hosts the sandbox may reach besides the gateway.
-- **The gateway**:
-  - `LITELLM_BASE_URL` is its OpenAI-compatible base URL, reachable from the sandbox. `LITELLM_API_KEY` is a LiteLLM virtual key.
-  - The key stays in this server by default: the sandbox gets a placeholder and OpenSandbox's Credential Vault puts the key on the requests to the gateway. `OPEN_SANDBOX_INSECURE_EGRESS` passes the key straight into the sandbox instead, for local dev where the vault cannot run.
-  - Codex calls the gateway's Responses API (`/v1/responses`). With no `CODEX_MODEL` it also reads the model list (`/v1/models`) to discover the models and their context windows and reasoning efforts.
-- **`CODEX_MODEL`** pins the model Codex uses, by its `model_name` at the gateway, such as `codex/gpt-5.6-luna`, unless a run's context names another. With it set, Codex uses that model directly and skips the `/models` catalog. Leave it empty only when the gateway answers `/models` in Codex's catalog format (LiteLLM v1.106 and later), which Codex then reads to pick a model; otherwise every run fails with "No models are available".
-- **A run's context** (or an assistant's) sets `model`, `effort`, `sandbox` and `approval_mode`.
-  - The default `sandbox`, `danger-full-access`, leaves the thread's OpenSandbox sandbox as the boundary. It runs Codex's commands as a non-root user, lets them write only under `/data` and `/tmp`, and lets them reach only the allowed hosts.
-  - `workspace-write` and `read-only` need Codex's bubblewrap sandbox, which cannot create namespaces in that hardened sandbox, so commands fail under them.
-  - The default `approval_mode`, `deny_all`, refuses Codex's requests to go beyond its sandbox mode; `auto_review` has Codex's reviewer decide them.
-- **Instructions and skills**: Codex reads the workspace's own `AGENTS.md`. The shared skills directory is mounted read-only as `/etc/codex`, so its `skills` are Codex's admin skills.
 
 ## Notes
 
-- **The sandbox's volume**: it holds the workspaces (`/data/workspace/<thread>`) and Codex's home with its sessions (`/data/home/.codex`). It is the Docker volume `agentos-codex-<assistant_id>`, so a sandbox that expired comes back with both.
-- **The app-server**: it runs as long as the sandbox, so it is only started once, not once per run. Commands Codex leaves running, such as a dev server, outlive the run too.
-- **Docker**: the server runs on the host's network, so `.env` works unchanged. Docker Desktop needs host networking turned on (Settings > Resources > Network). The image builds from the parent directory, to include `../zorvex`.
+- **The sandbox image** is `opensandbox-codex:<version>`, the `openai-codex-cli-bin` that `uv.lock` pins. `docker-compose.yml` builds it; `CODEX_VERSION=<version> docker compose build` builds another.
+- **The sandbox's volume**, `agentos-codex-<assistant_id>`, holds the workspaces and Codex's home with the sessions. A sandbox stops an hour after its last run and comes back with its volume; a thread's session and workspace are reclaimed after seven days without a run.
+- **The app-server** runs as long as the sandbox: commands Codex leaves running, such as a dev server, outlive the run.
+- **Docker**: `docker-compose.yml` runs the OpenSandbox server, which creates the sandboxes on this machine's Docker, and builds the sandbox image. The build reaches Debian and PyPI through Docker Desktop's proxy, `http.docker.internal:3128`, and so through whatever proxy Docker Desktop is set to.

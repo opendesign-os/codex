@@ -1,22 +1,68 @@
-# The codex server in a container on the host's network, so .env's localhost is this machine: the
-# same PostgreSQL, Redis and OpenSandbox server as outside Docker. Docker Desktop needs host networking turned on.
-# Codex runs in the sandboxes, which keep the workspaces and sessions, not in this container.
-
 services:
-  codex:
-    build:
-      # The parent directory, so the image can include the zorvex checkout next to this one.
-      context: ..
-      dockerfile: codex/Dockerfile
+  opensandbox-server:
+    image: opensandbox/server:release-1.1.0
     restart: unless-stopped
-    network_mode: host
-    env_file:
-      - .env
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
     environment:
-      - PORT=${PORT:-2027}
+      OPENSANDBOX_SERVER_API_KEY: ${OPEN_SANDBOX_API_KEY:?}
+    configs:
+      - source: opensandbox-server
+        target: /etc/opensandbox/config.toml
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:${PORT:-2027}/ok || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')"]
+      start_period: 15s
+      start_interval: 2s
+
+  opensandbox-codex:
+    image: opensandbox-codex:${CODEX_VERSION:-0.167.0}
+    build:
+      args:
+        CODEX_VERSION: ${CODEX_VERSION:-0.167.0}
+        http_proxy: http://http.docker.internal:3128
+        https_proxy: http://http.docker.internal:3128
+      dockerfile_inline: |
+        FROM python:3.12-slim-bookworm
+
+        ARG CODEX_VERSION
+
+        RUN apt-get update && apt-get install -y --no-install-recommends \
+                ca-certificates \
+                curl \
+                git \
+            && rm -rf /var/lib/apt/lists/*
+
+        RUN pip install --no-cache-dir "openai-codex-cli-bin==$${CODEX_VERSION}" \
+         && ln -sf "$$(python -c 'from codex_cli_bin import bundled_codex_path as p; print(p())')" /usr/local/bin/codex \
+         && helpers="$$(python -c 'from codex_cli_bin import bundled_path_dir as d; print(d() or "")' 2>/dev/null || true)" \
+         && if [ -n "$$helpers" ]; then for f in "$$helpers"/*; do ln -sf "$$f" /usr/local/bin/; done; fi \
+         && codex --version
+
+        ENV HOME=/data/home
+        WORKDIR /data/workspace
+    command: ["codex", "--version"]
+    restart: "no"
+
+configs:
+  opensandbox-server:
+    content: |
+      [server]
+      eip = "127.0.0.1"
+
+      [runtime]
+      type = "docker"
+      execd_image = "opensandbox/execd:v1.1.0"
+
+      [egress]
+      image = "opensandbox/egress:v1.1.7"
+      mode = "dns+nft"
+
+      [docker]
+      network_mode = "bridge"
+      host_ip = "host.docker.internal"
+      port_range_max = 49151
+
+      [storage]
+      allowed_host_paths = ["/run/desktop/mnt/host"]

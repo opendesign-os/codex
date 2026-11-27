@@ -10,6 +10,8 @@ dependencies = [
     "langgraph>=1.2.24",
     "codex-python[websocket]>=1.167.0",
     "opensandbox>=1.2",
+    "pydantic>=2.14.4",
+    "httpx>=0.28.1",
 ]
 
 [tool.uv]
@@ -23,6 +25,7 @@ zorvex-cli = { path = "../zorvex/libs/zorvex-cli", editable = true }
 
 [dependency-groups]
 dev = [
+    "pyright>=1.1.414",
     "ruff>=0.17.6",
 ]
 
@@ -36,3 +39,12 @@ ignore = ["E501", "ARG001", "ARG002"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["codex_agent"]
+
+[tool.pyright]
+include = ["src"]
+extraPaths = ["src"]
+pythonVersion = "3.12"
+typeCheckingMode = "strict"
+reportMissingTypeStubs = false
+venvPath = "."
+venv = ".venv"
