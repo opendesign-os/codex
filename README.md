@@ -5,6 +5,7 @@ Codex as the LangGraph graph `codex`, served by [Zorvex](../zorvex): it runs `co
 [codex-python](https://github.com/gersmann/codex-python) client. Each assistant has one sandbox, shared by its threads,
 and each thread is a Codex session with its own workspace, `/data/workspace/<thread>`. A run sends the thread's latest
 user message to Codex as a turn and streams Codex's messages and tool calls into the thread; the next run resumes it.
+When Codex asks for an approval or an answer, the run stops at a LangGraph interrupt (see *Human in the loop*).
 
 ## Run
 
@@ -78,6 +79,45 @@ WHERE graph_id = 'codex' AND user_id = 'system';
 
 COMMIT;
 ```
+
+## Human in the loop
+
+When Codex asks a human, the run stops at an interrupt and the thread is `interrupted`, with `next` = `["human"]`.
+These requests become interrupts:
+- command approvals
+- file-change approvals
+- permission requests
+- `request_user_input` questions
+- MCP elicitations
+
+The interrupt's value is Codex's request as it sent it, `{"method", "params"}`; the thread's `turn` holds it too.
+The answer is Codex's own response to that method, sent as the resume value:
+
+```bash
+curl -N http://127.0.0.1:2027/threads/<thread>/runs/stream -H 'Content-Type: application/json' \
+  -d '{"assistant_id": "codex", "command": {"resume": {"decision": "accept"}}, "stream_mode": ["messages-tuple", "updates"]}'
+```
+
+| `method` | Resume value |
+|---|---|
+| `item/commandExecution/requestApproval` | `{"decision": "accept"}`, or one of `params.availableDecisions` such as `"acceptForSession"`, `{"acceptWithExecpolicyAmendment": {...}}`, `"decline"` or `"cancel"` (which also ends the turn) |
+| `item/fileChange/requestApproval` | `{"decision": "accept" \| "acceptForSession" \| "decline" \| "cancel"}` |
+| `item/permissions/requestApproval` | `{"permissions": {...}, "scope": "turn" \| "session"}` |
+| `item/tool/requestUserInput` | `{"answers": {"<question id>": {"answers": ["..."]}}}` |
+| `mcpServer/elicitation/request` | `{"action": "accept" \| "decline" \| "cancel", "content": {...}}` |
+
+An answer that does not fit the method is asked again, with `errors` added to the interrupt's value.
+
+- **New message instead of an answer.** Codex's turn is interrupted; the new message starts a new turn.
+- **How long a request waits.** It waits inside the app-server as long as the sandbox lives: `SANDBOX_IDLE` after the
+  assistant's last run.
+- **When the answer can no longer be delivered.** If the sandbox stops or is replaced first, for example because `base_url`, `api_key`, `allowed_hosts` or whether
+  `codex.model` is set changed, the answer cannot be delivered and the thread says so.
+
+Codex asks only under an `approval_policy` other than `never`, such as `on-request`. Codex 0.167 rejects `untrusted`.
+Codex's own sandbox cannot start inside the OpenSandbox sandbox: bwrap needs user namespaces. So under `read-only` or
+`workspace-write`, a command first fails in it, and the model may or may not ask to run it unsandboxed. Command approvals
+therefore depend on the model; under `danger-full-access`, commands do not ask at all.
 
 ## Notes
 
