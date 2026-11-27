@@ -1,8 +1,9 @@
 """Codex, run through codex app-server, as a LangGraph graph, its models through a LiteLLM gateway.
 
-Each thread has its own OpenSandbox sandbox, where `codex app-server` runs, with one workspace and one Codex thread.
-A run connects to the app-server over WebSocket, sends the thread's latest user message to Codex as a turn, streams
-the turn into the thread as it runs, and the next run on the thread resumes the same Codex thread.
+Each assistant has one OpenSandbox sandbox, shared by its threads, where `codex app-server` runs. Every thread is a
+Codex session of its own under its own workspace subdirectory. A run connects to the app-server over WebSocket, sends
+the thread's latest user message to Codex as a turn, streams it into the thread, and the next run resumes the same
+Codex session; sessions idle longer than SESSION_IDLE are reclaimed and start fresh.
 """
 
 import asyncio
@@ -97,7 +98,6 @@ async def run_codex(state: State, runtime: Runtime[Context]) -> dict[str, Any]:
     prompt = _prompt(state["messages"])
     approval_policy, approvals_reviewer = _APPROVALS[context.approval_mode]
     settings: dict[str, Any] = {
-        "cwd": sandbox.WORKSPACE,
         "model": context.model,
         "sandbox": context.sandbox,
         "approval_policy": approval_policy,
@@ -107,9 +107,11 @@ async def run_codex(state: State, runtime: Runtime[Context]) -> dict[str, Any]:
     box = await sandbox.acquire(configurable["thread_id"], assistant_id=configurable.get("assistant_id"))
     try:
         url, token = await sandbox.app_server(box)
+        cwd, existed = await sandbox.prepare_thread(box, configurable["thread_id"])
+        settings["cwd"] = cwd
         client = AsyncAppServerClient(AsyncWebSocketTransport(url, AppServerWebSocketOptions(bearer_token=token)))
         async with sandbox.kept_alive(box), client:
-            if session_id := state.get("session_id"):
+            if (session_id := state.get("session_id")) and existed:
                 thread = await client.resume_thread(session_id, AppServerThreadResumeOptions(**settings))
             else:
                 thread = await client.start_thread(AppServerThreadStartOptions(**settings))

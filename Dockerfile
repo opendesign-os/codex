@@ -5,7 +5,7 @@ FROM python:3.12-slim-bookworm AS base
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
-# Non-root runtime user. Codex runs in the threads' sandboxes, not here.
+# Non-root runtime user. Codex runs in the sandboxes, not here.
 RUN addgroup --system app && adduser --system --ingroup app --home /home/app app
 
 # -----------------------------

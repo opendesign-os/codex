@@ -1,6 +1,6 @@
 # The codex server in a container on the host's network, so .env's localhost is this machine: the
 # same PostgreSQL, Redis and OpenSandbox server as outside Docker. Docker Desktop needs host networking turned on.
-# Codex runs in the threads' sandboxes, which keep the workspaces and sessions, not in this container.
+# Codex runs in the sandboxes, which keep the workspaces and sessions, not in this container.
 
 services:
   codex:

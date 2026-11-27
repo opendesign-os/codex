@@ -4,10 +4,10 @@ Codex, through `codex app-server` and the [codex-python](https://github.com/gers
 LangGraph graph, `codex`, served by [Zorvex](../zorvex) (installed from the checkout at `../zorvex`). Codex's models come
 through a LiteLLM gateway.
 
-Each thread has its own sandbox on OpenSandbox. There `codex app-server` runs, with its own workspace and its own Codex
-thread. A run connects to the app-server over WebSocket and sends the thread's latest user message to Codex as a turn.
-It streams the turn into the thread as it runs: Codex's messages, and its commands, file changes and other tool calls
-with their results. The next run on the thread resumes the same Codex thread.
+Each assistant has one sandbox on OpenSandbox, shared by its threads, where `codex app-server` runs. Every thread is a
+Codex session of its own under its own workspace subdirectory. A run connects to the app-server over WebSocket and sends
+the thread's latest user message to Codex as a turn. It streams the turn into the thread as it runs: Codex's messages,
+and its commands, file changes and other tool calls with their results. The next run on the thread resumes its session.
 
 ## Run
 
@@ -53,9 +53,9 @@ async for part in client.runs.stream(
   - `SANDBOX_ALLOWED_HOSTS` (comma-separated) are hosts the sandbox may reach besides the gateway.
 - **The gateway**:
   - `LITELLM_BASE_URL` is its OpenAI-compatible base URL, reachable from the sandbox. `LITELLM_API_KEY` is a LiteLLM virtual key.
-  - The key stays in this server. The sandbox gets a placeholder, and OpenSandbox's Credential Vault puts the key on the requests to the gateway.
-  - Codex calls the gateway's Responses API (`/v1/responses`), and reads its model list (`/v1/models`) for the models' context windows and reasoning efforts.
-- **`CODEX_MODEL`** is the model Codex asks the gateway for, by its `model_name` there, such as `codex/gpt-5.6-luna`, unless a run's context names another. Set it unless the gateway answers `/models` in Codex's catalog format (LiteLLM v1.106 and later). Otherwise Codex finds no model and every run fails with "No models are available".
+  - The key stays in this server by default: the sandbox gets a placeholder and OpenSandbox's Credential Vault puts the key on the requests to the gateway. `OPEN_SANDBOX_INSECURE_EGRESS` passes the key straight into the sandbox instead, for local dev where the vault cannot run.
+  - Codex calls the gateway's Responses API (`/v1/responses`). With no `CODEX_MODEL` it also reads the model list (`/v1/models`) to discover the models and their context windows and reasoning efforts.
+- **`CODEX_MODEL`** pins the model Codex uses, by its `model_name` at the gateway, such as `codex/gpt-5.6-luna`, unless a run's context names another. With it set, Codex uses that model directly and skips the `/models` catalog. Leave it empty only when the gateway answers `/models` in Codex's catalog format (LiteLLM v1.106 and later), which Codex then reads to pick a model; otherwise every run fails with "No models are available".
 - **A run's context** (or an assistant's) sets `model`, `effort`, `sandbox` and `approval_mode`.
   - The default `sandbox`, `danger-full-access`, leaves the thread's OpenSandbox sandbox as the boundary. It runs Codex's commands as a non-root user, lets them write only under `/data` and `/tmp`, and lets them reach only the allowed hosts.
   - `workspace-write` and `read-only` need Codex's bubblewrap sandbox, which cannot create namespaces in that hardened sandbox, so commands fail under them.
@@ -64,6 +64,6 @@ async for part in client.runs.stream(
 
 ## Notes
 
-- **The thread's volume**: it holds the workspace (`/data/workspace`) and Codex's home with its sessions (`/data/home/.codex`). It is the Docker volume `agentos-codex-<thread_id>`, so a sandbox that expired comes back with both.
+- **The sandbox's volume**: it holds the workspaces (`/data/workspace/<thread>`) and Codex's home with its sessions (`/data/home/.codex`). It is the Docker volume `agentos-codex-<assistant_id>`, so a sandbox that expired comes back with both.
 - **The app-server**: it runs as long as the sandbox, so it is only started once, not once per run. Commands Codex leaves running, such as a dev server, outlive the run too.
 - **Docker**: the server runs on the host's network, so `.env` works unchanged. Docker Desktop needs host networking turned on (Settings > Resources > Network). The image builds from the parent directory, to include `../zorvex`.
