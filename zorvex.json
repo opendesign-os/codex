@@ -1,6 +1,7 @@
 {
   "name": "codex",
   "dependencies": ["./src"],
+  "auth": { "path": "./src/agent/auth.py:auth" },
   "graphs": {
     "codex": {
       "path": "./src/agent/graph.py:graph",

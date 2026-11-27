@@ -343,7 +343,7 @@ requires-dist = [
     { name = "langgraph", specifier = ">=1.2.24" },
     { name = "opensandbox", specifier = ">=1.2" },
     { name = "pydantic", specifier = ">=2.14.4" },
-    { name = "zorvex-cli", editable = "../zorvex/libs/zorvex-cli" },
+    { name = "zorvex-cli", specifier = ">=0.0.5" },
 ]
 
 [package.metadata.requires-dev]
@@ -2786,7 +2786,7 @@ wheels = [
 [[package]]
 name = "zorvex-api"
 version = "0.0.5"
-source = { editable = "../zorvex/libs/zorvex-api" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "alembic" },
     { name = "anyio" },
@@ -2820,62 +2820,25 @@ dependencies = [
     { name = "tenacity" },
     { name = "uvicorn", extra = ["standard"] },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "alembic", specifier = ">=1.20.1" },
-    { name = "anyio", specifier = ">=4.16.0" },
-    { name = "asgi-correlation-id", specifier = ">=5.0.1" },
-    { name = "colorama", marker = "sys_platform == 'win32'", specifier = ">=0.4.6" },
-    { name = "croniter", specifier = ">=7.0.0" },
-    { name = "fastapi", specifier = ">=0.165.0" },
-    { name = "greenlet", specifier = ">=3.5.6" },
-    { name = "httpx", specifier = ">=0.28.1" },
-    { name = "jsonschema", specifier = ">=4.26.0" },
-    { name = "langchain-core", specifier = ">=1.8.4" },
-    { name = "langchain-protocol", specifier = ">=0.0.22" },
-    { name = "langgraph", specifier = ">=1.2.24" },
-    { name = "langgraph-checkpoint-postgres", specifier = ">=3.2.1" },
-    { name = "langgraph-sdk", specifier = ">=0.4.14" },
-    { name = "mcp", specifier = ">=2.3.0" },
-    { name = "openinference-instrumentation-langchain", specifier = ">=0.1.90" },
-    { name = "opentelemetry-api", specifier = ">=1.45.2" },
-    { name = "opentelemetry-exporter-otlp-proto-http", specifier = ">=1.45.2" },
-    { name = "opentelemetry-instrumentation-fastapi", specifier = ">=0.66b2" },
-    { name = "opentelemetry-sdk", specifier = ">=1.45.2" },
-    { name = "prometheus-fastapi-instrumentator", specifier = ">=8.1.0" },
-    { name = "psycopg", extras = ["binary", "pool"], specifier = ">=3.3.9" },
-    { name = "pydantic", specifier = ">=2.14.4" },
-    { name = "pydantic-settings", specifier = ">=2.16.3" },
-    { name = "redis", extras = ["hiredis"], specifier = ">=8.2.0" },
-    { name = "sqlalchemy", specifier = ">=2.1.9" },
-    { name = "sse-starlette", specifier = ">=3.7.1,<4.0.0" },
-    { name = "standardwebhooks", specifier = ">=1.3.0" },
-    { name = "structlog", specifier = ">=26.1.0" },
-    { name = "tenacity", specifier = ">=9.1.2" },
-    { name = "uvicorn", extras = ["standard"], specifier = ">=0.54.0" },
+sdist = { url = "https://files.pythonhosted.org/packages/45/f6/f44556c851e24fa82146652f8c1a537c0fb5d2d8a864a1d8f1f375647430/zorvex_api-0.0.5.tar.gz", hash = "sha256:c1870c7834d06e388a1774edef7736f0abe489b216335ef065f5f944fbee2bf5", size = 227200, upload-time = "2026-11-25T14:34:09.384Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c7/90/485b6c9010fd324cade7074e6619a5a930cc5abd19dee55b4fd2730fd758/zorvex_api-0.0.5-py3-none-any.whl", hash = "sha256:03e2bb1d4a061786c8bf148254c4a6f1af0d2e6f85632aaafd584b50138c98bb", size = 290827, upload-time = "2026-11-25T14:34:08.041Z" },
 ]
 
 [[package]]
 name = "zorvex-cli"
 version = "0.0.5"
-source = { editable = "../zorvex/libs/zorvex-cli" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
     { name = "python-dotenv" },
     { name = "rich" },
     { name = "zorvex-api" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "click", specifier = ">=8.5.1" },
-    { name = "debugpy", marker = "extra == 'debug'", specifier = ">=1.8.22" },
-    { name = "python-dotenv", specifier = ">=1.2.4" },
-    { name = "rich", specifier = ">=15.0.0" },
-    { name = "zorvex-api", editable = "../zorvex/libs/zorvex-api" },
+sdist = { url = "https://files.pythonhosted.org/packages/20/75/f61c051c19f9e737ed179d4f38593d727648013750f97627bf3e59854c55/zorvex_cli-0.0.5.tar.gz", hash = "sha256:cfa5b9a0bcaa6cfd2ccc681a50a9729c5d21266c290e0188a607a9d5b8208612", size = 17773, upload-time = "2026-11-25T14:34:30.775Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0b/32/f6149bceb7fee756fab7cb41d70f2fa19d3d769f03062476ba6070e743d3/zorvex_cli-0.0.5-py3-none-any.whl", hash = "sha256:c2f5b768b9d3aeb8a42166d964a7bd29083e60709f4be735ab2b68161eab03ee", size = 25846, upload-time = "2026-11-25T14:34:29.735Z" },
 ]
-provides-extras = ["debug"]
 
 [[package]]
 name = "zstandard"

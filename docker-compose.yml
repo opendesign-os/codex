@@ -8,6 +8,8 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       OPENSANDBOX_SERVER_API_KEY: ${OPEN_SANDBOX_API_KEY:?}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     configs:
       - source: opensandbox-server
         target: /etc/opensandbox/config.toml
@@ -21,8 +23,8 @@ services:
     build:
       args:
         CODEX_VERSION: ${CODEX_VERSION:-0.167.0}
-        http_proxy: http://http.docker.internal:3128
-        https_proxy: http://http.docker.internal:3128
+        http_proxy: ${BUILD_PROXY:-}
+        https_proxy: ${BUILD_PROXY:-}
       dockerfile_inline: |
         FROM python:3.12-slim-bookworm
 
@@ -45,6 +47,26 @@ services:
     command: ["codex", "--version"]
     restart: "no"
 
+  codex:
+    profiles: ["server"]
+    build:
+      context: .
+      args:
+        http_proxy: ${BUILD_PROXY:-}
+        https_proxy: ${BUILD_PROXY:-}
+    restart: unless-stopped
+    stop_grace_period: 60s
+    network_mode: host
+    env_file: .env
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://127.0.0.1:2027/ok"]
+      start_period: 30s
+    depends_on:
+      opensandbox-server:
+        condition: service_healthy
+      opensandbox-codex:
+        condition: service_completed_successfully
+
 configs:
   opensandbox-server:
     content: |
@@ -65,4 +87,4 @@ configs:
       port_range_max = 49151
 
       [storage]
-      allowed_host_paths = ["/run/desktop/mnt/host"]
+      allowed_host_paths = ["/run/desktop/mnt/host", '${SANDBOX_MOUNT_PATH:?}']

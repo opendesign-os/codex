@@ -16,6 +16,7 @@ def _docker(path: str) -> str:
 class Settings(BaseModel):
     model_config = ConfigDict(frozen=True, str_strip_whitespace=True, hide_input_in_errors=True)
 
+    token: SecretStr = Field(validation_alias="API_KEY", min_length=32)
     domain: str = Field(validation_alias="OPEN_SANDBOX_DOMAIN")
     key: SecretStr = Field(validation_alias="OPEN_SANDBOX_API_KEY")
     mount: Annotated[str, AfterValidator(_docker)] = Field(validation_alias="SANDBOX_MOUNT_PATH")

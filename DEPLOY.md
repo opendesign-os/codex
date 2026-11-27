@@ -1,257 +1,122 @@
-# Deploying codex
+# 部署 codex
 
-How to run codex on a Linux server. What the variables and the assistant's fields mean is in [README.md](README.md);
-this file covers what a server adds.
+在 Linux 服务器上用 Docker 一键部署：拉代码、填 `.env`、执行一条命令。各环境变量和 assistant 字段的含义见
+[README.md](README.md)。
 
-Everything that touches Docker runs on one host. The OpenSandbox server hands out sandbox endpoints on `127.0.0.1`, so
-Zorvex runs on that host too, under systemd rather than in a container:
+服务器和本机共用同一个 `docker-compose.yml`。`.env` 里设了 `COMPOSE_PROFILES=server`，它就启动三样东西：
 
-```text
-client ─▶ reverse proxy, with auth ─▶ zorvex serve, 127.0.0.1:2027 ─▶ PostgreSQL, Redis
-                                        │
-                                        ▼
-                       OpenSandbox server, 127.0.0.1:8080 (docker compose)
-                                        │
-                                        ▼
-                  a sandbox per assistant: codex app-server ─▶ LiteLLM gateway
-```
+- **codex**：本服务（Zorvex），镜像由仓库里的 `Dockerfile` 构建，监听 2027 端口，所有请求都要带 API Key；
+- **opensandbox-server**：OpenSandbox server，由它在本机 Docker 上为每个 assistant 创建沙箱；
+- **opensandbox-codex**：沙箱镜像，装着 `uv.lock` 锁定版本的 Codex。
 
-## Requirements
+PostgreSQL 和 Redis 用服务器上已有的。codex 用 host 网络运行，所以 `.env` 里写的数据库地址（包括 `localhost`）在容器里照样
+可用，OpenSandbox 返回的 `127.0.0.1` 沙箱地址也能直接访问。
 
-- Linux with Docker Engine 25 or later and the Compose plugin 2.23.1 or later: `docker-compose.yml` uses
-  `configs.content`, `dockerfile_inline` and `healthcheck.start_interval`.
-- [uv](https://docs.astral.sh/uv/), which also installs Python 3.12.
-- PostgreSQL, and Redis 5.0 or later.
-- Network: Docker Hub, Debian and PyPI to build; the LiteLLM gateway, from the Docker host, to run.
+## 准备
 
-## 1. Code
+- Linux，Docker Engine 25 或更新版本，Compose 插件 2.23.1 或更新版本。
+- 已有的 PostgreSQL，以及 Redis 5.0 或更新版本。表由 codex 启动时自动迁移创建，但 schema 本身要事先建好：
 
-The checkout belongs to a service user, `codex` here. `uv.lock` takes `zorvex-cli` from `../zorvex`, so Zorvex is
-checked out beside it, at the tag the lock was made with:
-
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sudo env UV_INSTALL_DIR=/usr/local/bin sh
-sudo useradd --system --create-home --home-dir /opt/agentos --shell /usr/sbin/nologin codex
-sudo -u codex -H git clone https://github.com/opendesign-os/zorvex.git /opt/agentos/zorvex
-sudo -u codex -H git -C /opt/agentos/zorvex checkout v0.0.5
-sudo -u codex -H git clone https://github.com/opendesign-os/codex.git /opt/agentos/codex
-cd /opt/agentos/codex && sudo -u codex -H uv sync --frozen --no-dev
-```
-
-To take Zorvex from PyPI instead, where `zorvex-cli` 0.0.5 is published, delete `[tool.uv.sources]` from
-`pyproject.toml` and run `uv lock`.
-
-## 2. Settings
-
-`/opt/agentos/codex/.env`, owned by `codex` and `chmod 600`:
-
-```dotenv
-DATABASE_URI=postgresql://<user>:<password>@<host>:5432/<database>?options=-csearch_path%3Dcodex
-REDIS_URI=redis://<host>:6379/3
-OPEN_SANDBOX_DOMAIN=127.0.0.1:8080
-OPEN_SANDBOX_API_KEY=<the output of openssl rand -hex 32>
-SANDBOX_MOUNT_PATH=/srv/codex
-SANDBOX_IDLE=PT1H
-SANDBOX_RETENTION=P7D
-COMPOSE_FILE=docker-compose.yml:docker-compose.server.yml
-LOG_FORMAT=json
-```
-
-`zorvex serve` loads this file, and so does Docker Compose run in this directory: it gives `OPEN_SANDBOX_API_KEY` to
-the OpenSandbox server, and `COMPOSE_FILE` adds the Linux override of step 4. Zorvex's own settings, such as
-`BG_JOB_TIMEOUT_SECS` (the longest a run may take, an hour by default), are in Zorvex's README.
-
-## 3. Database
-
-```sql
-CREATE SCHEMA codex;
-```
-
-The user in `DATABASE_URI` needs to create tables in it: the server applies its migrations there as it starts, and
-`uv run zorvex db upgrade` applies them out of band.
-
-## 4. OpenSandbox and the sandbox image
-
-`docker-compose.yml` is set up for Docker Desktop on Windows. `/opt/agentos/codex/docker-compose.server.yml` adapts it
-to Docker Engine on Linux:
-
-```yaml
-services:
-  opensandbox-server:
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-  opensandbox-codex:
-    build:
-      args:
-        http_proxy: ""
-        https_proxy: ""
-
-configs:
-  opensandbox-server:
-    content: |
-      [server]
-      eip = "127.0.0.1"
-
-      [runtime]
-      type = "docker"
-      execd_image = "opensandbox/execd:v1.1.0"
-
-      [egress]
-      image = "opensandbox/egress:v1.1.7"
-      mode = "dns+nft"
-
-      [docker]
-      network_mode = "bridge"
-      host_ip = "host.docker.internal"
-      port_range_min = 40000
-      port_range_max = 49151
-
-      [storage]
-      allowed_host_paths = ["/srv/codex"]
-```
-
-| Setting | On Linux |
-|---|---|
-| `extra_hosts`, `host_ip` | The OpenSandbox server runs in a container and reaches the sandboxes' published ports at `host_ip`. Docker Engine defines `host.docker.internal` only through `host-gateway`. |
-| `http_proxy`, `https_proxy` | `http.docker.internal:3128` is Docker Desktop's proxy. Empty, the build goes out directly; set the server's proxy if it needs one. |
-| `allowed_host_paths` | `SANDBOX_MOUNT_PATH`, whose skills the sandboxes mount, in place of Docker Desktop's drive mounts. |
-| `port_range_min`, `port_range_max` | The host ports the sandboxes take, two or three each; step 7 keeps them off the network. |
-| `eip` | The host in the endpoints the OpenSandbox server hands out, which Zorvex on this host reaches at `127.0.0.1`. |
-
-These values follow from OpenSandbox's settings; the project has so far run on Docker Desktop, so step 8 checks them on
-a first deploy.
-
-```bash
-cd /opt/agentos/codex
-sudo docker compose build opensandbox-codex
-sudo docker pull opensandbox/execd:v1.1.0
-sudo docker pull opensandbox/egress:v1.1.7
-sudo docker compose up -d --wait opensandbox-server
-curl -fsS http://127.0.0.1:8080/health
-```
-
-The build makes `opensandbox-codex:0.167.0`, the Codex that `uv.lock` pins; the pulls spare the first sandbox the wait
-for the images it starts with.
-
-## 5. The server
-
-`/etc/systemd/system/codex.service`:
-
-```ini
-[Unit]
-Description=Codex agent server (Zorvex)
-After=network-online.target docker.service
-Wants=network-online.target
-
-[Service]
-User=codex
-WorkingDirectory=/opt/agentos/codex
-ExecStart=/opt/agentos/codex/.venv/bin/zorvex serve --host 127.0.0.1 --port 2027 --proxy-headers
-Restart=on-failure
-TimeoutStopSec=60
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now codex
-curl -fsS 'http://127.0.0.1:2027/ok?check_db=1'
-```
-
-The first start applies the migrations and creates the system assistant `codex`. On a stop, runs get 30 seconds
-(`WORKER_DRAIN_TIMEOUT`) to finish; the others go back to the queue and start their Codex turn over after the restart.
-A request waiting for a human lives in the sandbox, so it outlasts the restart.
-
-## 6. The assistant
-
-Configure the system assistant in the database as README's *Assistants* shows, with a `base_url` that the Docker host
-reaches. Its id names its skills directory:
-
-```bash
-curl -s http://127.0.0.1:2027/assistants/search -H 'Content-Type: application/json' -d '{"graph_id": "codex"}'
-sudo install -d -o codex -g codex /srv/codex/.agent/skills/<assistant_id>
-```
-
-Codex's approvals and questions to a human are in README's *Human in the loop*.
-
-## 7. Access
-
-- **Authentication.** `zorvex.json` has no `auth.path`, so every request is one anonymous user: whoever reaches the
-  server can run Codex on the gateway's key and read every thread. Keep it on `127.0.0.1` behind a reverse proxy that
-  authenticates, or give Zorvex an `auth.path`. Streams need the proxy not to buffer; in nginx, with `auth_basic` or
-  your SSO in the `server` block:
-
-  ```nginx
-  location / {
-      proxy_pass http://127.0.0.1:2027;
-      proxy_http_version 1.1;
-      proxy_set_header Host $host;
-      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-      proxy_set_header X-Forwarded-Proto $scheme;
-      proxy_buffering off;
-      proxy_read_timeout 1h;
-  }
+  ```sql
+  CREATE SCHEMA codex;
   ```
 
-- **Firewall.** From outside, only SSH and the proxy's port. The OpenSandbox API is bound to `127.0.0.1`, but Docker
-  publishes the sandboxes' ports on every interface, and its NAT rules take them past the host's INPUT rules, ufw's
-  included. Drop them in `DOCKER-USER`, with the public interface in place of `eth0`, and persist the rule:
+- 网络：构建时要能访问 Docker Hub、ghcr.io、Debian 和 PyPI；运行时要能访问 LiteLLM 网关。
+
+## 部署
+
+```bash
+git clone https://github.com/opendesign-os/codex.git
+cd codex
+cp .env.example .env
+chmod 600 .env
+vi .env
+docker compose up -d --build
+```
+
+`.env` 在服务器上这样填：
+
+| 变量 | 填什么 |
+|---|---|
+| `DATABASE_URI` | 已有的 PostgreSQL，保留末尾的 `?options=-csearch_path%3Dcodex` |
+| `REDIS_URI` | 已有的 Redis |
+| `API_KEY` | 客户端调用时带在 `x-api-key` 请求头里的密钥：`openssl rand -hex 32` 的输出 |
+| `OPEN_SANDBOX_DOMAIN` | `127.0.0.1:8080` |
+| `OPEN_SANDBOX_API_KEY` | 另一个 `openssl rand -hex 32` 的输出 |
+| `SANDBOX_MOUNT_PATH` | 存放 skills 的宿主机目录，如 `/srv/codex` |
+| `SANDBOX_IDLE`、`SANDBOX_RETENTION` | 如 `PT1H`、`P7D` |
+| `BUILD_PROXY` | 服务器能直接访问外网就留空，否则填代理地址 |
+| `COMPOSE_PROFILES` | `server` |
+
+`docker compose up -d --build` 构建 codex 镜像和沙箱镜像，启动 OpenSandbox server，等它健康后再启动 codex。codex 每次启动
+都会检查数据库，有新的迁移就执行；首次启动还会创建系统 assistant `codex`。
+
+## 配置 assistant
+
+按 README「Assistant 配置」一节，在数据库里给系统 assistant 填上 `base_url`、`api_key` 等；`base_url` 要填服务器能访问到
+的地址。然后按它的 id 建 skills 目录：
+
+```bash
+curl -s http://127.0.0.1:2027/assistants/search -H 'x-api-key: <API_KEY>' -H 'Content-Type: application/json' -d '{"graph_id": "codex"}'
+sudo mkdir -p /srv/codex/.agent/skills/<assistant_id>
+```
+
+## 验证
+
+```bash
+curl -s http://127.0.0.1:2027/ok
+curl -s http://127.0.0.1:2027/runs/wait -H 'x-api-key: <API_KEY>' -H 'Content-Type: application/json' \
+  -d '{"assistant_id": "codex", "input": {"messages": [{"role": "user", "content": "Reply with only OK."}]}}'
+```
+
+第一次运行要创建 assistant 的沙箱，耗时较长；返回的最后一条消息应该是 `OK`。
+
+已验证和未验证的部分：
+- 已验证：合并后的 `docker-compose.yml` 在本机 Docker Desktop 上跑过，OpenSandbox 和 skills 挂载正常；codex 镜像也在容器里
+  验证过启动、自动迁移和 API Key 鉴权。
+- 未验证：Linux 上用 host 网络运行的 codex 容器还没实际跑过，首次部署时以这一步的结果为准。
+
+## 安全
+
+- **API**：除 `/ok` 和 `/info` 外，所有请求都要带正确的 `x-api-key`，否则返回 401。2027 端口直接对外；走公网时建议在前面
+  加一层 HTTPS 反向代理，否则 key 以明文传输。
+- **沙箱端口**：Docker 把沙箱端口（40000–49151）发布在所有网卡上，而且它的 NAT 规则会绕过主机的 INPUT 规则（ufw 也拦不
+  住）。在 `DOCKER-USER` 链里拦掉，把 `eth0` 换成公网网卡，并把规则持久化：
 
   ```bash
   sudo iptables -I DOCKER-USER -i eth0 -p tcp -m conntrack --ctorigdstport 40000:49151 --ctdir ORIGINAL -j DROP
   ```
 
-  A cloud security group that admits only SSH and HTTPS does the same.
-- **Secrets.** `.env` holds the OpenSandbox key, which also signs each sandbox's app-server token. The database holds
-  each assistant's gateway key in plain text, so its access and its backups need the same care.
+  也可以用云厂商的安全组，只放行 SSH 和 2027（或反向代理的 443），效果相同。
+- **密钥**：`.env` 里有 `API_KEY` 和 OpenSandbox 的 key，权限设为 600。数据库里以明文保存每个 assistant 的网关 key，
+  数据库的访问权限和备份同样要严格控制。
 
-## 8. Check
+## 运维
 
-```bash
-curl -s http://127.0.0.1:2027/runs/wait -H 'Content-Type: application/json' \
-  -d '{"assistant_id": "codex", "input": {"messages": [{"role": "user", "content": "Reply with only OK."}]}}'
-sudo docker ps --filter ancestor=opensandbox-codex:0.167.0
-```
-
-The first run creates the assistant's sandbox and takes longer. Its last message is `OK`, and `docker ps` lists the
-sandbox.
-
-## Operations
-
-| | |
+| 事项 | 命令 |
 |---|---|
-| Logs | `journalctl -u codex -f`, `sudo docker compose logs -f opensandbox-server`, and a sandbox's `sudo docker logs <container>` |
-| Updates | `git pull`, Zorvex at the tag `uv.lock` uses, `sudo -u codex -H uv sync --frozen --no-dev`, `sudo systemctl restart codex` |
-| Backups | `pg_dump --schema=codex`, and each assistant's volume `agentos-codex-<assistant_id>`, which holds its workspaces and Codex's sessions |
-| More instances | One PostgreSQL, Redis and OpenSandbox server for all. Instances on other hosts need `eip` set to the Docker host's address and the port range open to them. |
+| 更新 | `git pull && docker compose up -d --build` |
+| 日志 | `docker compose logs -f codex`、`docker compose logs -f opensandbox-server`，单个沙箱用 `docker logs <container>` |
+| 重启 | `docker compose restart codex` |
+| 备份 | `pg_dump --schema=codex`，以及每个 assistant 的卷 `agentos-codex-<assistant_id>`（工作区和 Codex 会话） |
 
-A new Codex: when `uv.lock` moves `openai-codex-cli-bin`, build that version before the restart. Sandboxes on the old
-image are replaced on their next run; their volumes keep the workspaces and sessions, but requests waiting for a human
-in them are lost.
+- 重启 codex 时，正在进行的运行有 30 秒收尾，没完成的放回队列，重启后重新开始；等待人工答复的请求保存在沙箱里，不受影响。
+- Codex 升级（`uv.lock` 里的 `openai-codex-cli-bin` 变了）后，`docker-compose.yml` 里 `CODEX_VERSION` 的默认值要跟着改，
+  沙箱镜像的标签必须和它一致。旧镜像的沙箱会在下次运行时被替换：卷里的工作区和会话保留，但其中等待人工答复的请求会丢失。
 
-```bash
-version=$(sudo -u codex -H uv run --frozen python -c "from importlib.metadata import version; print(version('openai-codex-cli-bin'))")
-sudo CODEX_VERSION=$version docker compose build opensandbox-codex
-sudo systemctl restart codex
-```
+## 排障
 
-A volume's backup:
-
-```bash
-sudo docker run --rm -v agentos-codex-<assistant_id>:/data:ro -v /backup:/backup debian:bookworm-slim \
-  tar czf /backup/agentos-codex-<assistant_id>.tgz -C /data .
-```
-
-## Troubleshooting
-
-| Symptom | Fix |
+| 现象 | 处理 |
 |---|---|
-| `required variable OPEN_SANDBOX_API_KEY is missing a value` | Run `docker compose` in `/opt/agentos/codex`, beside `.env`. |
-| A sandbox fails to start on its `skills` mount | `allowed_host_paths` covers `SANDBOX_MOUNT_PATH`, and the assistant's skills directory exists. |
-| Sandboxes never get ready; the egress sidecar's readiness check fails | `host_ip` and `extra_hosts`, step 4. |
-| The sandbox image is missing | Build the `openai-codex-cli-bin` version that `uv.lock` pins. |
-| Requests to `127.0.0.1` go through a proxy | With `HTTP_PROXY` or `HTTPS_PROXY` in the environment, add `NO_PROXY=127.0.0.1,localhost`. |
-| Runs stop with connection errors to the gateway | `base_url`'s host is reachable from the Docker host; other hosts Codex needs are in `allowed_hosts`. |
-| Commands fail with `bwrap: No permissions to create a new namespace` | Codex's own sandbox cannot start in a container: `sandbox_mode = "danger-full-access"`, as README says. |
+| `required variable OPEN_SANDBOX_API_KEY is missing a value` | 在仓库根目录（`.env` 所在目录）运行 `docker compose`。 |
+| `docker compose up` 没有启动 codex | `.env` 里设 `COMPOSE_PROFILES=server`。 |
+| codex 启动失败，日志里有 `no schema has been selected to create in` | 数据库里还没建 `codex` schema。 |
+| codex 启动失败，日志里有 `API_KEY` 的校验错误 | `API_KEY` 至少 32 位。 |
+| 请求返回 401 `Missing or invalid x-api-key header` | 请求头带上 `x-api-key: <API_KEY>`。 |
+| codex 连不上数据库或 Redis | codex 用 host 网络，`DATABASE_URI` 和 `REDIS_URI` 要写宿主机能访问的地址。 |
+| 运行报 `SandboxApiException`，OpenSandbox 日志里有 `images/<id>/json` 404 | 同一标签的沙箱镜像重建后，旧镜像上的沙箱查不到镜像。用 `docker rm -f` 删掉旧的 `sandbox-<id>` 和 `sandbox-egress-<id>` 容器，下次运行会重建。 |
+| 沙箱启动时 `skills` 挂载失败 | `SANDBOX_MOUNT_PATH` 下 assistant 的 skills 目录要先建好。 |
+| 沙箱一直不就绪，egress sidecar 的就绪检查失败 | 检查 `docker-compose.yml` 里 opensandbox-server 的 `extra_hosts` 和 `host_ip`。 |
+| 发往 `127.0.0.1` 的请求走了代理 | 环境里设了 `HTTP_PROXY` 或 `HTTPS_PROXY` 时，加上 `NO_PROXY=127.0.0.1,localhost`。 |
+| 运行因连接网关出错而中止 | 服务器要能访问 `base_url` 的主机；Codex 还要访问的其他主机要加到 `allowed_hosts`。 |
+| 命令报 `bwrap: No permissions to create a new namespace` | Codex 自己的沙箱在容器里起不来：按 README 设 `sandbox_mode = "danger-full-access"`。 |

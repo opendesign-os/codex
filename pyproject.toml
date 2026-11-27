@@ -5,7 +5,7 @@ description = "Codex through codex app-server in OpenSandbox sandboxes, as a gra
 requires-python = ">=3.12"
 
 dependencies = [
-    "zorvex-cli",
+    "zorvex-cli>=0.0.5",
     "langchain-core>=1.8.4",
     "langgraph>=1.2.24",
     "codex-python[websocket]>=1.167.0",
@@ -17,11 +17,6 @@ dependencies = [
 [tool.uv]
 # The project is not installed: Zorvex puts zorvex.json's dependencies (./src) on sys.path.
 package = false
-
-[tool.uv.sources]
-# The zorvex checkout next to this project (zorvex-api comes with it), so server changes apply here before a
-# release. Drop this line to take zorvex-cli and zorvex-api from PyPI instead.
-zorvex-cli = { path = "../zorvex/libs/zorvex-cli", editable = true }
 
 [dependency-groups]
 dev = [
