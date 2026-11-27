@@ -131,6 +131,7 @@ async def _create(scope: str, nonce: str, fingerprint: str, context: Context, co
             "agentos.nonce": nonce,
             "agentos.fingerprint": fingerprint,
         },
+        resource=context.resources.model_dump(),
         volumes=[data, skills],
         entrypoint=server.command(context, scope, nonce),
         network_policy=NetworkPolicy(
@@ -172,6 +173,7 @@ def _fingerprint(context: Context) -> str:
         "api_key": context.api_key.get_secret_value(),
         "allowed_hosts": sorted(set(context.allowed_hosts)),
         "pinned": context.codex.model is not None,
+        "resources": context.resources.model_dump(),
         "mount": settings.mount,
     }
     return sign(json.dumps(shape, sort_keys=True))[:32]

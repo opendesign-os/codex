@@ -54,8 +54,8 @@ uv run zorvex dev --port 2027 --no-db-check
 
 ## Assistant 配置
 
-assistant 的 context（`src/agent/context.py`）有四个必填字段和三个可选字段，不接受其他字段。运行时也可以带 `context`，按顶层
-字段覆盖 assistant 的配置；三个可选字段一般就是这样按次传的。
+assistant 的 context（`src/agent/context.py`）有四个必填字段和四个可选字段，不接受其他字段。运行时也可以带 `context`，按顶层
+字段覆盖 assistant 的配置；`turn`、`tools`、`review` 一般就是这样按次传的。
 
 | 字段 | 说明 |
 |---|---|
@@ -63,12 +63,14 @@ assistant 的 context（`src/agent/context.py`）有四个必填字段和三个�
 | `api_key` | 网关的 key。沙箱里只有一个占位符，由 OpenSandbox 的 Credential Vault 在发往网关的请求上换成真实的 key。 |
 | `allowed_hosts` | 除网关之外沙箱可以访问的主机，`[]` 表示没有；其余一律拦截。 |
 | `codex` | Codex 自身的配置，写法和它的 `config.toml` 一样，对所有线程生效。设 `sandbox_mode = "danger-full-access"` 和 `approval_policy = "never"`：隔离边界是 OpenSandbox 沙箱，Codex 自己的沙箱在里面跑不起来。不设 `model` 时，Codex 从网关的 `/models` 列表里挑模型，这要求 LiteLLM v1.106 或更新版本。MCP server 也写在这里，见下面「MCP」。 |
+| `resources` | 可选。沙箱的 CPU 和内存上限，默认 `{"cpu": "1", "memory": "2Gi"}`，可以只写其中一项。`cpu` 是核数，如 `2`、`0.5`、`500m`；`memory` 是带单位的大小，如 `512Mi`、`4Gi`、`4G`。这是上限，不预先占用；同一个 assistant 的所有线程共用这一个沙箱。 |
 | `turn` | 可选。Codex 这一轮的参数，即 codex-python 的 `AppServerTurnOptions`：`model`、`effort`、`summary`、`output_schema`（结构化输出）、`collaboration_mode`（plan 模式）、`personality`、`service_tier`、`approval_policy`、`sandbox_policy` 等。不填就沿用线程的配置。 |
 | `tools` | 可选。客户端工具（Codex 的 dynamic tools），如 `{"type": "function", "name": "...", "description": "...", "inputSchema": {...}}`。在 Codex 会话创建时，也就是线程第一次运行时生效，之后改不了。Codex 调用它时，运行停在 interrupt 上，见「人工介入（HITL）」。 |
 | `review` | 可选。设了就把这一轮跑成代码审查，值是审查目标：`{"type": "uncommittedChanges"}`、`{"type": "baseBranch", "branch": "..."}`、`{"type": "commit", "sha": "..."}` 或 `{"type": "custom", "instructions": "..."}`。用户消息的内容不发给 Codex，审查结论写进对话。 |
 
-`base_url`、`api_key`、`allowed_hosts` 以及是否设置了 `codex.model` 决定了沙箱本身，改了其中任何一项，下次运行就会换一个新沙箱；
-工作区和会话在卷里，不受影响。context 按原样存储，包括 key。
+`base_url`、`api_key`、`allowed_hosts`、`resources` 以及是否设置了 `codex.model` 决定了沙箱本身，改了其中任何一项，下次运行就会换
+一个新沙箱；工作区和会话在卷里，不受影响。这几项在 assistant 上设，不要按次传：同一个 assistant 的线程共用一个沙箱，按次传不同的
+值会换掉它，打断其他线程正在进行的运行。context 按原样存储，包括 key。
 
 系统 assistant `codex` 属于服务端，所以在数据库里配置：`codex.assistant` 里它那一行的 `config.configurable` 就是 context，
 每次修改还要在 `codex.assistant_versions` 里新增一行。
@@ -82,6 +84,7 @@ SET config = a.config || jsonb_build_object('configurable',
             'base_url', 'https://litellm.example.com/v1',
             'api_key',  'sk-...',
             'allowed_hosts', '[]'::jsonb,
+            'resources', jsonb_build_object('cpu', '1', 'memory', '2Gi'),
             'codex', jsonb_build_object(
                 'model', 'codex/gpt-5.6-luna',
                 'sandbox_mode', 'danger-full-access',
@@ -100,6 +103,25 @@ WHERE graph_id = 'codex' AND user_id = 'system';
 
 COMMIT;
 ```
+
+其他 assistant 用 API 创建，`context` 就是上表的字段。它的 skills 目录也要先建好，否则沙箱挂载失败：
+
+```bash
+curl -s http://127.0.0.1:2027/assistants -H 'x-api-key: <API_KEY>' -H 'Content-Type: application/json' -d '{
+  "graph_id": "codex",
+  "name": "team-a",
+  "context": {
+    "base_url": "https://litellm.example.com/v1",
+    "api_key": "sk-...",
+    "allowed_hosts": [],
+    "codex": {"model": "codex/gpt-5.6-luna", "sandbox_mode": "danger-full-access", "approval_policy": "never"},
+    "resources": {"cpu": "2", "memory": "4Gi"}
+  }
+}'
+mkdir -p <SANDBOX_MOUNT_PATH>/.agent/skills/<返回的 assistant_id>
+```
+
+改配置用 `PATCH /assistants/<assistant_id>`，`context` 要带全：它整个替换旧的，并自动记一个新版本。
 
 ### MCP
 
