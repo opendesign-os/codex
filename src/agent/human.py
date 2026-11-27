@@ -12,6 +12,7 @@ RESPONSES: Final[dict[str, type[BaseModel]]] = {
     "item/permissions/requestApproval": protocol.PermissionsRequestApprovalResponse,
     "item/tool/requestUserInput": protocol.ToolRequestUserInputResponse,
     "mcpServer/elicitation/request": protocol.McpServerElicitationRequestResponse,
+    "item/tool/call": protocol.DynamicToolCallResponse,
 }
 
 

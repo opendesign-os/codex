@@ -1,5 +1,7 @@
 from codex import CodexConfig
-from pydantic import BaseModel, ConfigDict, HttpUrl, SecretStr
+from codex.app_server import AppServerTurnOptions
+from codex.protocol import types as protocol
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, SecretStr
 
 
 class Context(BaseModel):
@@ -9,3 +11,6 @@ class Context(BaseModel):
     api_key: SecretStr
     allowed_hosts: list[str]
     codex: CodexConfig
+    turn: AppServerTurnOptions = Field(default_factory=AppServerTurnOptions)
+    tools: list[protocol.DynamicToolSpec] = Field(default_factory=list[protocol.DynamicToolSpec])
+    review: protocol.ReviewTarget | None = None

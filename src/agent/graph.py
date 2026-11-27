@@ -2,23 +2,23 @@ import uuid
 from typing import Annotated, Any, NotRequired, TypedDict
 
 from codex.app_server import (
-    AppServerInitializeOptions,
+    AppServerRpcError,
+    AppServerThreadForkOptions,
     AppServerThreadResumeOptions,
     AppServerThreadStartOptions,
     AppServerTurnError,
-    AppServerWebSocketOptions,
     AsyncAppServerClient,
     AsyncAppServerThread,
     AsyncTurnStream,
 )
-from codex.app_server.transports import AsyncWebSocketTransport
 from codex.protocol import types as protocol
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
 from langgraph.config import get_config
 from langgraph.graph import END, START, StateGraph, add_messages
 from langgraph.runtime import Runtime
+from opensandbox import Sandbox
 
-from agent import human, sandbox, stream, workspace
+from agent import content, human, sandbox, stream, workspace
 from agent.context import Context
 
 
@@ -28,6 +28,7 @@ class Input(TypedDict):
 
 class State(Input):
     session: NotRequired[str]
+    head: NotRequired[str | None]
     turn: NotRequired[human.Turn | None]
 
 
@@ -39,45 +40,36 @@ async def run(state: State, runtime: Runtime[Context]) -> dict[str, Any]:
     thread: str = configurable["thread_id"]
     scope: str = configurable["assistant_id"]
     paused = _paused(state.get("turn"), state["messages"])
-    asked, text = (paused["prompt"], None) if paused else _prompt(state["messages"])
+    asked, prompt = (paused["prompt"], None) if paused else _prompt(state["messages"])
     answers = paused["answers"] if paused else []
+    head = state.get("head")
     transcript: list[AnyMessage] = []
     waiting: human.Turn | None = None
     reason: str | None = None
 
     lease = await sandbox.acquire(scope, context)
-    try:
+    async with sandbox.connect(lease) as client:
         cwd, existed = await workspace.prepare(lease.sandbox, thread)
-        client = AsyncAppServerClient(
-            AsyncWebSocketTransport(lease.url, AppServerWebSocketOptions(bearer_token=lease.token)),
-            AppServerInitializeOptions(experimental_api=True),
-        )
-        async with sandbox.keepalive(lease.sandbox), client:
-            inbox = human.Inbox(client, answers)
-            session = state.get("session")
-            if session and existed:
-                codex = await client.resume_thread(session, AppServerThreadResumeOptions(cwd=cwd, config=context.codex))
+        inbox = human.Inbox(client, answers)
+        codex = await _open(client, lease.sandbox, state.get("session"), head, cwd, existed, context)
+        turn = await _follow(client, codex, paused, asked, prompt, context)
+        if turn is None:
+            reason = "the turn waiting for an answer is no longer running"
+        else:
+            try:
+                outcome = await stream.relay(client, turn, inbox, transcript, asked)
+            except AppServerTurnError as error:
+                reason = str(error)
             else:
-                codex = await client.start_thread(AppServerThreadStartOptions(cwd=cwd, config=context.codex))
-            turn = await _follow(client, codex, paused, text)
-            if turn is None:
-                reason = "the turn waiting for an answer is no longer running"
-            else:
-                try:
-                    outcome = await stream.relay(client, turn, inbox, transcript)
-                except AppServerTurnError as error:
-                    reason = str(error)
+                if isinstance(outcome, protocol.Turn):
+                    reason = stream.failure(outcome)
+                    head = outcome.id
                 else:
-                    if isinstance(outcome, protocol.Turn):
-                        reason = stream.failure(outcome)
-                    else:
-                        waiting = human.Turn(id=turn.turn_id, prompt=asked, request=outcome, answers=answers)
-    finally:
-        await lease.sandbox.close()
+                    waiting = human.Turn(id=turn.turn_id, prompt=asked, request=outcome, answers=answers)
 
     if reason:
         transcript.append(AIMessage(id=str(uuid.uuid4()), content=f"Codex stopped: {reason}"))
-    return {"session": codex.id, "messages": transcript, "turn": waiting}
+    return {"session": codex.id, "head": head, "messages": transcript, "turn": waiting}
 
 
 async def answer(state: State) -> dict[str, Any]:
@@ -92,15 +84,67 @@ def route(state: State) -> str:
     return "human" if turn and turn["request"] else END
 
 
+async def _open(
+    client: AsyncAppServerClient,
+    box: Sandbox,
+    session: str | None,
+    head: str | None,
+    cwd: str,
+    existed: bool,
+    context: Context,
+) -> AsyncAppServerThread:
+    found = await _read(client, session) if session else None
+    if found is not None and found.cwd.root != cwd:
+        await workspace.copy(box, found.cwd.root, cwd)
+        return await _fork(client, found, head, cwd, context)
+    if found is not None and existed:
+        if _diverged(found, head):
+            return await _fork(client, found, head, cwd, context)
+        options = AppServerThreadResumeOptions(cwd=cwd, config=context.codex)
+        return await client.resume_thread(found.id, options)
+    options = AppServerThreadStartOptions(cwd=cwd, config=context.codex, dynamic_tools=list(context.tools))
+    return await client.start_thread(options)
+
+
+async def _read(client: AsyncAppServerClient, session: str) -> protocol.Thread | None:
+    try:
+        return await client.read_thread(session, include_turns=True)
+    except AppServerRpcError:
+        return None
+
+
+def _diverged(thread: protocol.Thread, head: str | None) -> bool:
+    ids = [turn.id for turn in thread.turns]
+    after = thread.turns[ids.index(head) + 1 :] if head in ids else thread.turns
+    return head is not None and any(turn.status.root == "completed" for turn in after)
+
+
+async def _fork(
+    client: AsyncAppServerClient, source: protocol.Thread, head: str | None, cwd: str, context: Context
+) -> AsyncAppServerThread:
+    origin = await client.resume_thread(source.id)
+    return await origin.fork(AppServerThreadForkOptions(cwd=cwd, config=context.codex, last_turn_id=head))
+
+
 async def _follow(
-    client: AsyncAppServerClient, codex: AsyncAppServerThread, paused: human.Turn | None, text: str | None
+    client: AsyncAppServerClient,
+    codex: AsyncAppServerThread,
+    paused: human.Turn | None,
+    asked: str,
+    prompt: HumanMessage | None,
+    context: Context,
 ) -> AsyncTurnStream | None:
     current = stream.active(codex)
     if paused and current and current.id == paused["id"]:
         return stream.attach(client, codex, current)
     if current:
         await stream.abandon(client, codex.id, current)
-    return await codex.run(text) if text is not None else None
+    if prompt is None:
+        return None
+    if context.review is not None:
+        return await codex.review(target=context.review)
+    options = context.turn.model_copy(update={"client_user_message_id": asked})
+    return await codex.run(content.inputs(prompt.content), options)
 
 
 def _paused(turn: human.Turn | None, messages: list[AnyMessage]) -> human.Turn | None:
@@ -108,11 +152,11 @@ def _paused(turn: human.Turn | None, messages: list[AnyMessage]) -> human.Turn |
     return turn if turn and asked and asked[-1] == turn["prompt"] else None
 
 
-def _prompt(messages: list[AnyMessage]) -> tuple[str, str]:
+def _prompt(messages: list[AnyMessage]) -> tuple[str, HumanMessage]:
     latest = messages[-1] if messages else None
     if not isinstance(latest, HumanMessage) or latest.id is None:
         raise ValueError("Codex acts on the thread's latest message, which must be a user message")
-    return latest.id, latest.text
+    return latest.id, latest
 
 
 graph = (

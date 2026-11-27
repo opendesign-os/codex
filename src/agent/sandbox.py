@@ -9,6 +9,8 @@ from datetime import timedelta
 from importlib.metadata import version
 from typing import Final, Literal
 
+from codex.app_server import AppServerInitializeOptions, AppServerWebSocketOptions, AsyncAppServerClient
+from codex.app_server.transports import AsyncWebSocketTransport
 from opensandbox import Sandbox, SandboxManager
 from opensandbox.config import ConnectionConfig
 from opensandbox.models.sandboxes import (
@@ -68,6 +70,19 @@ async def acquire(scope: str, context: Context) -> Lease:
         sandbox = await Sandbox.connect(keep.id, connection_config=connection)
         await sandbox.renew(settings.idle)
     return Lease(sandbox, await server.url(sandbox), server.token(scope, nonce))
+
+
+@asynccontextmanager
+async def connect(lease: Lease) -> AsyncGenerator[AsyncAppServerClient]:
+    client = AsyncAppServerClient(
+        AsyncWebSocketTransport(lease.url, AppServerWebSocketOptions(bearer_token=lease.token)),
+        AppServerInitializeOptions(experimental_api=True),
+    )
+    try:
+        async with keepalive(lease.sandbox), client:
+            yield client
+    finally:
+        await lease.sandbox.close()
 
 
 @asynccontextmanager

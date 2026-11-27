@@ -2,16 +2,18 @@ import asyncio
 import json
 from collections.abc import AsyncGenerator, Callable, Iterable
 from contextlib import aclosing, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, cast
 
 from codex.app_server import AppServerRpcError, AsyncAppServerClient, AsyncAppServerThread, AsyncTurnStream
 from codex.protocol import types as protocol
-from langchain_core.messages import AIMessage, AIMessageChunk, AnyMessage, BaseMessage, ToolMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, AnyMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages.ai import UsageMetadata
+from langgraph.config import get_stream_writer
 from langgraph.graph.message import push_message
 from pydantic import BaseModel
 
-from agent import human
+from agent import content, human
 
 
 @dataclass(frozen=True)
@@ -34,6 +36,35 @@ class Tool:
         return ToolMessage(id=f"{self.id}-output", tool_call_id=self.id, content=self.output, status=status)
 
 
+@dataclass
+class Usage:
+    base: dict[str, int] | None = None
+    total: dict[str, int] = field(default_factory=dict[str, int])
+
+    def update(self, usage: protocol.ThreadTokenUsage) -> None:
+        total = usage.total.model_dump(exclude_none=True)
+        if self.base is None:
+            last = usage.last.model_dump(exclude_none=True)
+            self.base = {key: value - last.get(key, 0) for key, value in total.items()}
+        self.total = total
+
+    def attach(self, transcript: list[AnyMessage]) -> None:
+        if self.base is None:
+            return
+        spent = {key: value - self.base.get(key, 0) for key, value in self.total.items()}
+        usage = UsageMetadata(
+            input_tokens=spent["inputTokens"],
+            output_tokens=spent["outputTokens"],
+            total_tokens=spent["totalTokens"],
+            input_token_details={"cache_read": spent["cachedInputTokens"]},
+            output_token_details={"reasoning": spent["reasoningOutputTokens"]},
+        )
+        for index in range(len(transcript) - 1, -1, -1):
+            if isinstance(message := transcript[index], AIMessage) and not message.tool_calls:
+                transcript[index] = message.model_copy(update={"usage_metadata": usage})
+                return
+
+
 def active(thread: AsyncAppServerThread) -> protocol.Turn | None:
     return next((turn for turn in thread.snapshot.turns if turn.status.root == "inProgress"), None)
 
@@ -49,20 +80,32 @@ async def abandon(client: AsyncAppServerClient, thread: str, turn: protocol.Turn
 
 
 async def relay(
-    client: AsyncAppServerClient, turn: AsyncTurnStream, inbox: human.Inbox, transcript: list[AnyMessage]
+    client: AsyncAppServerClient,
+    turn: AsyncTurnStream,
+    inbox: human.Inbox,
+    transcript: list[AnyMessage],
+    prompt: str | None,
 ) -> protocol.Turn | human.Request:
+    write = get_stream_writer()
     started: dict[str, dict[str, Any]] = {}
     streamed: set[str] = set()
     processes: set[str] = set()
+    usage = Usage()
     try:
         async with aclosing(_events(turn, inbox)) as events:
             async for event in events:
                 if not isinstance(event, BaseModel):
                     return event
+                write(event.model_dump(mode="json", by_alias=True, exclude_none=True))
                 match event:
                     case protocol.ItemAgentMessageDeltaNotification(params=params):
                         streamed.add(params.itemId)
                         _emit(AIMessageChunk(id=params.itemId, content=params.delta))
+                    case protocol.ItemReasoningSummaryTextDeltaNotification(params=params):
+                        streamed.add(params.itemId)
+                        _emit(AIMessageChunk(id=params.itemId, content=[_reasoning(params.delta, params.summaryIndex)]))
+                    case protocol.ThreadTokenUsageUpdatedNotificationModel(params=params):
+                        usage.update(params.tokenUsage)
                     case protocol.ItemStartedNotificationModel(params=params):
                         processes.update(_processes(params.item))
                         if tool := parse(params.item):
@@ -75,12 +118,12 @@ async def relay(
                                 _emit(tool.call())
                             _emit(tool.result())
                             transcript.extend((tool.call(), tool.result()))
-                        elif isinstance(item := params.item.root, protocol.AgentMessageThreadItem) and item.text:
-                            message = AIMessage(id=item.id, content=item.text)
-                            if item.id not in streamed:
+                        elif message := _message(params.item, prompt):
+                            if message.id not in streamed:
                                 _emit(message)
                             transcript.append(message)
                     case protocol.TurnCompletedNotificationModel(params=params):
+                        usage.attach(transcript)
                         return params.turn
                     case _:
                         pass
@@ -110,10 +153,17 @@ def parse(item: protocol.ThreadItem) -> Tool | None:
             done = patch.status.root == "completed"
             return Tool(patch.id, "apply_patch", {"changes": changes}, patch.status.root, done)
         case protocol.McpToolCallThreadItem() as call:
+            name = f"mcp__{call.server}__{call.tool}"
             output = call.error.message if call.error else _text(call.result)
-            raw = call.arguments
-            args = cast(dict[str, Any], raw) if isinstance(raw, dict) else {"arguments": raw}
-            return Tool(call.id, f"mcp__{call.server}__{call.tool}", args, output, call.status.root == "completed")
+            return Tool(call.id, name, _args(call.arguments), output, call.status.root == "completed")
+        case protocol.DynamicToolCallThreadItem() as call:
+            name = f"{call.namespace}__{call.tool}" if call.namespace else call.tool
+            items = [item.root for item in call.contentItems or []]
+            texts = [
+                item.text for item in items if isinstance(item, protocol.InputTextDynamicToolCallOutputContentItem)
+            ]
+            output = "\n".join(texts) if len(texts) == len(items) else _dump(items)
+            return Tool(call.id, name, _args(call.arguments), output, call.success is True)
         case protocol.WebSearchThreadItem() as search:
             return Tool(search.id, "web_search", {"query": search.query}, _dump(search.results or []), True)
         case protocol.ImageViewThreadItem() as view:
@@ -126,6 +176,30 @@ def parse(item: protocol.ThreadItem) -> Tool | None:
             return Tool(call.id, call.tool.root, args, _dump(agents), call.status.root == "completed")
         case _:
             return None
+
+
+def _message(item: protocol.ThreadItem, prompt: str | None) -> AnyMessage | None:
+    match item.root:
+        case protocol.AgentMessageThreadItem(id=key, text=str() as text) if text:
+            return AIMessage(id=key, content=text)
+        case protocol.ReasoningThreadItem(id=key, summary=[*summary]) if summary:
+            return AIMessage(id=key, content=[_reasoning("\n\n".join(summary), 0)])
+        case protocol.PlanThreadItem(id=key, text=str() as text) if text:
+            return AIMessage(id=key, content=text)
+        case protocol.ExitedReviewModeThreadItem(id=key, review=str() as review):
+            return AIMessage(id=key, content=review)
+        case protocol.ImageGenerationThreadItem(root=protocol.ResultThreadItem(id=key, result=str() as result)):
+            return AIMessage(id=key, content=[{"type": "image", "base64": result, "mime_type": "image/png"}])
+        case protocol.ImageGenerationThreadItem(root=protocol.FileIdThreadItem(id=key, fileId=str() as file)):
+            return AIMessage(id=key, content=[{"type": "image", "file_id": file}])
+        case protocol.UserMessageThreadItem(id=key, clientId=client, content=inputs) if client != prompt:
+            return HumanMessage(id=client or key, content=cast(list[str | dict[str, Any]], content.blocks(inputs)))
+        case _:
+            return None
+
+
+def _reasoning(text: str, index: int) -> dict[str, Any]:
+    return {"type": "reasoning", "reasoning": text, "index": index}
 
 
 async def _events(turn: AsyncTurnStream, inbox: human.Inbox) -> AsyncGenerator[BaseModel | human.Request]:
@@ -185,6 +259,10 @@ def _emit(message: BaseMessage) -> None:
     push_message(message, state_key=None)
 
 
+def _args(raw: object) -> dict[str, Any]:
+    return cast(dict[str, Any], raw) if isinstance(raw, dict) else {"arguments": raw}
+
+
 def _text(result: protocol.McpToolCallResult | None) -> str:
     if result is None:
         return ""
@@ -194,4 +272,4 @@ def _text(result: protocol.McpToolCallResult | None) -> str:
 
 
 def _dump(value: object) -> str:
-    return json.dumps(value, default=lambda model: model.model_dump(mode="json"))
+    return json.dumps(value, default=lambda model: model.model_dump(mode="json", exclude_none=True))

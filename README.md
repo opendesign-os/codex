@@ -54,14 +54,18 @@ uv run zorvex dev --port 2027 --no-db-check
 
 ## Assistant 配置
 
-assistant 的 context（`src/agent/context.py`）有四个字段，全部必填，不接受其他字段：
+assistant 的 context（`src/agent/context.py`）有四个必填字段和三个可选字段，不接受其他字段。运行时也可以带 `context`，按顶层
+字段覆盖 assistant 的配置；三个可选字段一般就是这样按次传的。
 
 | 字段 | 说明 |
 |---|---|
 | `base_url` | LiteLLM 网关的 OpenAI 兼容 base URL，沙箱要能访问到。 |
 | `api_key` | 网关的 key。沙箱里只有一个占位符，由 OpenSandbox 的 Credential Vault 在发往网关的请求上换成真实的 key。 |
 | `allowed_hosts` | 除网关之外沙箱可以访问的主机，`[]` 表示没有；其余一律拦截。 |
-| `codex` | Codex 自身的配置，写法和它的 `config.toml` 一样，对所有线程生效。设 `sandbox_mode = "danger-full-access"` 和 `approval_policy = "never"`：隔离边界是 OpenSandbox 沙箱，Codex 自己的沙箱在里面跑不起来。不设 `model` 时，Codex 从网关的 `/models` 列表里挑模型，这要求 LiteLLM v1.106 或更新版本。 |
+| `codex` | Codex 自身的配置，写法和它的 `config.toml` 一样，对所有线程生效。设 `sandbox_mode = "danger-full-access"` 和 `approval_policy = "never"`：隔离边界是 OpenSandbox 沙箱，Codex 自己的沙箱在里面跑不起来。不设 `model` 时，Codex 从网关的 `/models` 列表里挑模型，这要求 LiteLLM v1.106 或更新版本。MCP server 也写在这里，见下面「MCP」。 |
+| `turn` | 可选。Codex 这一轮的参数，即 codex-python 的 `AppServerTurnOptions`：`model`、`effort`、`summary`、`output_schema`（结构化输出）、`collaboration_mode`（plan 模式）、`personality`、`service_tier`、`approval_policy`、`sandbox_policy` 等。不填就沿用线程的配置。 |
+| `tools` | 可选。客户端工具（Codex 的 dynamic tools），如 `{"type": "function", "name": "...", "description": "...", "inputSchema": {...}}`。在 Codex 会话创建时，也就是线程第一次运行时生效，之后改不了。Codex 调用它时，运行停在 interrupt 上，见「人工介入（HITL）」。 |
+| `review` | 可选。设了就把这一轮跑成代码审查，值是审查目标：`{"type": "uncommittedChanges"}`、`{"type": "baseBranch", "branch": "..."}`、`{"type": "commit", "sha": "..."}` 或 `{"type": "custom", "instructions": "..."}`。用户消息的内容不发给 Codex，审查结论写进对话。 |
 
 `base_url`、`api_key`、`allowed_hosts` 以及是否设置了 `codex.model` 决定了沙箱本身，改了其中任何一项，下次运行就会换一个新沙箱；
 工作区和会话在卷里，不受影响。context 按原样存储，包括 key。
@@ -97,14 +101,76 @@ WHERE graph_id = 'codex' AND user_id = 'system';
 COMMIT;
 ```
 
+### MCP
+
+Codex 要用的 MCP server 写在 `codex.mcp_servers` 里，写法同 `config.toml` 的 `[mcp_servers.<name>]`。沙箱里没有
+`config.toml`：`codex` 字段在每次创建、恢复或分叉 Codex 会话时作为会话的 config 传给 app-server，相当于 `codex -c` 的覆盖，
+所以 MCP 也写在这里，不另外放文件。改动对之后新建的线程生效。
+
+```json
+{
+  "allowed_hosts": ["mcp.example.com"],
+  "codex": {
+    "sandbox_mode": "danger-full-access",
+    "approval_policy": "never",
+    "mcp_servers": {
+      "docs": {
+        "url": "https://mcp.example.com/mcp",
+        "http_headers": {"Authorization": "Bearer <token>"}
+      }
+    }
+  }
+}
+```
+
+- **用 HTTP 方式的 server**：沙箱镜像里只有 Python、git、curl 和 Codex，没有 Node 和 uv，用 `npx`、`uvx` 启动的 stdio server
+  起不来；要用就先装进 `docker-compose.yml` 里的沙箱镜像。
+- **网络**：MCP server 的主机要加进 `allowed_hosts`，否则会被拦截。改 `allowed_hosts` 会换沙箱（见上），只改 `mcp_servers` 不会。
+- **token**：写在 `http_headers` 里，和 context 的其他字段一样按原样存储。它会进入沙箱，由 Codex 自己带上，不像网关的 key 那样
+  沙箱里只有占位符。
+- **运行时覆盖**：运行时带的 `context.codex` 会整个替换 assistant 的 `codex`，要保留 MCP 就一起带上。
+- Codex 调用 MCP 工具时，写回线程的工具名是 `mcp__<server>__<tool>`；MCP server 发起的 elicitation 见「人工介入（HITL）」。
+
+系统 assistant 用上面的 SQL 写入：在 `codex` 的 `jsonb_build_object` 里加上 `'mcp_servers', '{...}'::jsonb`，`allowed_hosts`
+一并改。
+
+## 输入与输出
+
+用户消息除了文字，还可以是 LangChain 的内容块列表：
+
+- `text`
+- `image`：`url`、`base64` 加 `mime_type`，或 `file_id`；OpenAI 的 `image_url` 块也可以
+- `audio`：写法同 `image`
+- Codex 自己的块原样传过去：`localImage`、`localAudio`（沙箱里的路径），`skill`、`mention`（`name` 和 `path`）
+
+写回线程的消息：
+
+- Codex 的回复，流式推送
+- 推理摘要，`reasoning` 内容块，流式推送
+- 计划、review 的结论
+- 工具调用和结果：shell、apply_patch、MCP、联网搜索、查看图片、子 agent、客户端工具
+- 生成的图片，`image` 内容块
+- 最后一条 AI 消息带 `usage_metadata`，是这一轮的 token 用量
+
+`stream_mode` 加上 `custom`，就能收到 Codex 的全部原始事件，每个都是原样的 `{"method", "params"}`，包括命令的实时输出、
+计划更新、diff 和 token 用量。
+
+## 复制线程与分叉
+
+- `POST /threads/{thread_id}/copy` 复制出的线程，第一次运行时 fork 源线程的 Codex 会话，并把源线程工作区里那时的文件拷过来；
+  之后两边互不影响。
+- 运行时带 `checkpoint_id`，从更早的 checkpoint 分叉时，Codex 会话也在那一轮 fork。线程状态里的 `head` 记着每条分支最后
+  一轮 Codex turn 的 id。工作区只有一份，文件不会回滚。
+
 ## 人工介入（HITL）
 
-Codex 向人提问时，运行停在 interrupt 上，线程状态为 `interrupted`，`next` 为 `["human"]`。以下请求会变成 interrupt：
+Codex 需要调用方答复时，运行停在 interrupt 上，线程状态为 `interrupted`，`next` 为 `["human"]`。以下请求会变成 interrupt：
 - 命令审批
 - 文件改动审批
 - 权限请求
 - `request_user_input` 提问
 - MCP elicitation
+- 客户端工具调用
 
 interrupt 的值就是 Codex 发来的原始请求 `{"method", "params"}`，线程状态里的 `turn` 也存了一份。答复用 Codex 对这个
 method 的原生响应格式，作为 resume 的值发回：
@@ -121,6 +187,7 @@ curl -N http://127.0.0.1:2027/threads/<thread>/runs/stream -H 'x-api-key: <API_K
 | `item/permissions/requestApproval` | `{"permissions": {...}, "scope": "turn" \| "session"}` |
 | `item/tool/requestUserInput` | `{"answers": {"<question id>": {"answers": ["..."]}}}` |
 | `mcpServer/elicitation/request` | `{"action": "accept" \| "decline" \| "cancel", "content": {...}}` |
+| `item/tool/call` | 工具的结果：`{"contentItems": [{"type": "inputText", "text": "..."}], "success": true}`，图片用 `{"type": "inputImage", "imageUrl": "..."}` |
 
 答复不符合该 method 的格式时，会重新询问，并在 interrupt 的值里附上 `errors`。
 
@@ -138,4 +205,6 @@ curl -N http://127.0.0.1:2027/threads/<thread>/runs/stream -H 'x-api-key: <API_K
 - **沙箱镜像**是 `opensandbox-codex:<version>`，版本就是 `uv.lock` 锁定的 `openai-codex-cli-bin`。由 `docker-compose.yml` 构建；`CODEX_VERSION=<version> docker compose build` 构建其他版本。
 - **沙箱的卷** `agentos-codex-<assistant_id>` 存放工作区和 Codex 的 home（含会话）。沙箱在最后一次运行一小时后停止，再启动时挂回原来的卷；线程的会话和工作区在七天没有运行后回收。
 - **app-server** 和沙箱同生命周期：Codex 留在后台的命令（比如开发服务器）在运行结束后仍会继续跑。
+- **追加输入**：LangGraph 没有往进行中的一轮注入输入的接口。运行中再发消息按 `multitask_strategy` 处理，`interrupt` 会结束
+  当前这一轮，用新消息开始新的一轮。Codex 的线程管理（改名、手动压缩等）和 app-server 的其他服务也没有对外开放。
 - **Docker**：`docker-compose.yml` 本机和服务器共用。OpenSandbox server（由它在本机的 Docker 上创建沙箱）和沙箱镜像总会启动；`COMPOSE_PROFILES=server` 时再加上本服务的容器，由 `Dockerfile` 构建，用 host 网络运行。OpenSandbox 的 `allowed_host_paths` 同时列出 Docker Desktop 的磁盘挂载根目录 `/run/desktop/mnt/host` 和 `SANDBOX_MOUNT_PATH`，所以 Windows 路径和 Linux 路径都能用。

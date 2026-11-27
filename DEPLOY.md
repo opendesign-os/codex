@@ -30,8 +30,9 @@ git clone https://github.com/opendesign-os/codex.git
 cd codex
 cp .env.example .env
 chmod 600 .env
-vi .env
+vi .env                         # 按下表填写，COMPOSE_PROFILES 一定要设成 server，否则不会启动 codex
 docker compose up -d --build
+docker compose ps               # 要能看到 codex、opensandbox-server 两个容器在运行
 ```
 
 `.env` 在服务器上这样填：
@@ -43,13 +44,42 @@ docker compose up -d --build
 | `API_KEY` | 客户端调用时带在 `x-api-key` 请求头里的密钥：`openssl rand -hex 32` 的输出 |
 | `OPEN_SANDBOX_DOMAIN` | `127.0.0.1:8080` |
 | `OPEN_SANDBOX_API_KEY` | 另一个 `openssl rand -hex 32` 的输出 |
-| `SANDBOX_MOUNT_PATH` | 存放 skills 的宿主机目录，如 `/srv/codex` |
+| `SANDBOX_MOUNT_PATH` | `/srv/codex`，skills 的根目录，见下面「skills 目录」 |
 | `SANDBOX_IDLE`、`SANDBOX_RETENTION` | 如 `PT1H`、`P7D` |
 | `BUILD_PROXY` | 服务器能直接访问外网就留空，否则填代理地址 |
 | `COMPOSE_PROFILES` | `server` |
 
 `docker compose up -d --build` 构建 codex 镜像和沙箱镜像，启动 OpenSandbox server，等它健康后再启动 codex。codex 每次启动
 都会检查数据库，有新的迁移就执行；首次启动还会创建系统 assistant `codex`。
+
+## skills 目录
+
+`SANDBOX_MOUNT_PATH` 填宿主机上的绝对路径，服务器上统一用 `/srv/codex`：
+
+```dotenv
+SANDBOX_MOUNT_PATH=/srv/codex
+```
+
+每个 assistant 的 skills 放在 `/srv/codex/.agent/skills/<assistant_id>/` 下，一个 skill 一个子目录，里面是它的 `SKILL.md`。
+沙箱把这个 assistant 的目录只读挂载到 `/etc/codex/skills`；`docker-compose.yml` 会自动把 `SANDBOX_MOUNT_PATH` 加进
+OpenSandbox 的 `allowed_host_paths`，不用另外配置。
+
+```text
+/srv/codex/
+└── .agent/
+    └── skills/
+        └── <assistant_id>/
+            └── <skill>/
+                └── SKILL.md
+```
+
+部署前先建好根目录：
+
+```bash
+sudo mkdir -p /srv/codex/.agent/skills
+```
+
+如果 skills 由别的程序（比如 agentos console）写到其他目录，就把 `SANDBOX_MOUNT_PATH` 填成那个目录，里面的结构保持不变。
 
 ## 配置 assistant
 
